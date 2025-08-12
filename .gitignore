@@ -1,0 +1,43 @@
+# macOS
+.DS_Store
+
+# Python cache/bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment files
+.env
+.env.*
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Tools caches
+.mypy_cache/
+.pytest_cache/
+
+# Logs
+*.log
+
+# IDE/editor
+.vscode/
+.idea/
+
+# Vector DB (Chroma)
+chroma-db/
+
+# Neo4j (Docker volumes)
+neo4j/data/
+neo4j/logs/
+neo4j/plugins/ 
+
+data/
