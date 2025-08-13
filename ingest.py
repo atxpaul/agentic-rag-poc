@@ -6,14 +6,18 @@ import requests
 from dotenv import load_dotenv
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_chroma import Chroma
+from langchain_qdrant import QdrantVectorStore
 from langchain_core.embeddings import Embeddings
 from langchain_community.document_loaders import TextLoader, PyPDFLoader
+from qdrant_client import QdrantClient
+from qdrant_client.models import VectorParams, Distance
 
 load_dotenv()
 
 DATA_DIR = Path("data")
-DB_DIR = "chroma-db"
+QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
+QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "docs")
+QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 
 
 class LMStudioEmbeddings(Embeddings):
@@ -134,10 +138,10 @@ def _build_graph_for_chunks(chunks: List):
 
 
 def _stable_chunk_id(source: str, content: str) -> str:
-    import hashlib
+    import uuid
 
-    base = f"{source}\n{content}".encode("utf-8")
-    return hashlib.sha1(base).hexdigest()
+    name = f"{source}\n{content}"
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, name))
 
 
 def main():
@@ -166,14 +170,26 @@ def main():
                         "nomic-ai/nomic-embed-text-v1.5"),
     )
 
-    # Open or create the vectorstore and perform idempotent add via delete+add
-    vectorstore = Chroma(
-        persist_directory=DB_DIR,
-        collection_name="docs",
-        embedding_function=embeddings,
+    # Open or create Qdrant vectorstore and perform idempotent add via delete+add
+    qdrant_client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
+    # Ensure collection exists with proper vector size
+    try:
+        qdrant_client.get_collection(collection_name=QDRANT_COLLECTION)
+    except Exception:
+        probe_dim = len(embeddings.embed_query("dimension probe"))
+        qdrant_client.create_collection(
+            collection_name=QDRANT_COLLECTION,
+            vectors_config=VectorParams(
+                size=probe_dim, distance=Distance.COSINE),
+        )
+
+    vectorstore = QdrantVectorStore(
+        client=qdrant_client,
+        collection_name=QDRANT_COLLECTION,
+        embedding=embeddings,
     )
 
-    # Build deterministic ids list
+    # Build deterministic ids list (UUID strings)
     ids = [d.metadata["chunk_id"] for d in chunks]
 
     # Optional replacement strategy per source
@@ -198,7 +214,8 @@ def main():
     if _graph_enabled():
         _build_graph_for_chunks(chunks)
 
-    print(f"Ingested {len(chunks)} chunks into {DB_DIR}")
+    print(
+        f"Ingested {len(chunks)} chunks into Qdrant collection '{QDRANT_COLLECTION}'")
 
 
 if __name__ == "__main__":

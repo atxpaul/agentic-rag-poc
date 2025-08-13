@@ -4,16 +4,81 @@ from typing import List
 import requests
 from dotenv import load_dotenv
 
-from langchain_chroma import Chroma
+from langchain_qdrant import QdrantVectorStore
 from langchain_openai import ChatOpenAI
 from langchain_core.embeddings import Embeddings
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.runnables import RunnablePassthrough
+from qdrant_client import QdrantClient
+import logging
+import json
+from datetime import datetime
+from pathlib import Path
+import time
+import uuid
+import hashlib
 
 load_dotenv()
 
-DB_DIR = "chroma-db"
+QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
+QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "docs")
+QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
+RAG_LOG_PATH = os.getenv("RAG_LOG_PATH", "logs/rag.log")
+RAG_INDEX_VERSION = os.getenv("RAG_INDEX_VERSION", "v1")
+
+
+# -------- Logging setup --------
+def _setup_logger():
+    logger = logging.getLogger("rag")
+    if logger.handlers:
+        return logger
+    logger.setLevel(logging.INFO)
+    log_path = Path(RAG_LOG_PATH)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    handler = logging.FileHandler(log_path, encoding="utf-8")
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(handler)
+    return logger
+
+
+_LOGGER = _setup_logger()
+
+
+def _log_event(event: str, data: dict):
+    payload = {"ts": datetime.utcnow().isoformat() + "Z", "event": event}
+    payload.update(data)
+    try:
+        _LOGGER.info(json.dumps(payload, ensure_ascii=False))
+    except Exception:
+        # Evitar que logging rompa el flujo de RAG
+        pass
+
+
+def _hash_question(q: str) -> str:
+    return hashlib.sha1(q.encode("utf-8")).hexdigest()
+
+
+def _doc_id_from_source(source: str) -> str:
+    return hashlib.sha1((source or "").encode("utf-8")).hexdigest()
+
+
+def _detect_lang_basic(text: str) -> str:
+    lowered = text.lower()
+    spanish_markers = ["¿", "¡", "cómo", "qué", "cuál",
+                       "dónde", "por qué", "porque", "para", "con"]
+    if any(tok in lowered for tok in spanish_markers):
+        return "es"
+    return "unknown"
+
+
+def _classify_intent_basic(text: str) -> str:
+    lowered = text.lower().strip()
+    chit = ["hola", "qué tal", "como estás", "gracias", "ok", "vale"]
+    if any(lowered.startswith(x) or x in lowered for x in chit):
+        return "chitchat"
+    return "task"
 
 
 class LMStudioEmbeddings(Embeddings):
@@ -117,10 +182,11 @@ def build_chain():
                         "nomic-ai/nomic-embed-text-v1.5"),
     )
 
-    vectorstore = Chroma(
-        persist_directory=DB_DIR,
-        collection_name="docs",
-        embedding_function=embeddings,
+    qdrant_client = QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
+    vectorstore = QdrantVectorStore(
+        client=qdrant_client,
+        collection_name=QDRANT_COLLECTION,
+        embedding=embeddings,
     )
     retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
 
@@ -138,39 +204,135 @@ def build_chain():
         ("human", "Question:\n{question}\n\nContext:\n{context}")
     ])
 
+    def _common_meta(question: str):
+        return {
+            "trace_id": str(uuid.uuid4()),
+            "question_hash": _hash_question(question),
+            "question_meta": {
+                "lang": _detect_lang_basic(question),
+                "len": len(question),
+                "intent": _classify_intent_basic(question),
+            },
+            "index_version": RAG_INDEX_VERSION,
+            "model_version": {
+                "embedder": os.getenv("LMSTUDIO_EMBED_MODEL", "unknown"),
+                "llm": os.getenv("LMSTUDIO_CHAT_MODEL", "unknown"),
+            },
+        }
+
     def retrieve_with_graph(question: str):
-        base_docs = retriever.get_relevant_documents(question)
+        meta = _common_meta(question)
+
+        # Time embedding (probe only)
+        t0 = time.perf_counter()
+        try:
+            _ = embeddings.embed_query(question)
+        finally:
+            t1 = time.perf_counter()
+        embed_ms = int((t1 - t0) * 1000)
+
+        # Retrieve base with scores
+        t2 = time.perf_counter()
+        base_with_scores = vectorstore.similarity_search_with_score(
+            question, k=4)
+        t3 = time.perf_counter()
+        retrieve_ms = int((t3 - t2) * 1000)
+
+        base_docs = [d for d, _ in base_with_scores]
         neighbor_ids = _expand_with_graph_context(base_docs)
 
+        # Neighbor fetch (no scores)
+        t4 = time.perf_counter()
         extra_docs = []
         for cid in neighbor_ids:
-            # Pull neighbors by metadata filter. Use empty query + filter
             try:
-                extra_docs.extend(
-                    vectorstore.similarity_search(
-                        "", k=1, filter={"chunk_id": cid}
-                    )
-                )
+                extra_docs.extend(vectorstore.similarity_search(
+                    "", k=1, filter={"chunk_id": cid}))
             except Exception:
                 pass
+        t5 = time.perf_counter()
+        rerank_ms = int((t5 - t4) * 1000)
 
-        # Deduplicate by chunk_id
+        # Merge and dedup
         seen = set()
         merged = []
-        for d in base_docs + extra_docs:
-            key = d.metadata.get("chunk_id") or (
-                d.metadata.get("source"), d.metadata.get("chunk_index"))
-            if key not in seen:
-                seen.add(key)
-                merged.append(d)
+        ranked = []
+        # First, base with their scores
+        for rank, (doc, score) in enumerate(base_with_scores, start=1):
+            key = doc.metadata.get("chunk_id") or (
+                doc.metadata.get("source"), doc.metadata.get("chunk_index"))
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(doc)
+            ranked.append((doc, score, rank))
+        # Then neighbors without score
+        for doc in extra_docs:
+            key = doc.metadata.get("chunk_id") or (
+                doc.metadata.get("source"), doc.metadata.get("chunk_index"))
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(doc)
+            ranked.append((doc, None, len(ranked) + 1))
+
+        _log_event("retrieval", {
+            **meta,
+            "stage": "retrieval",
+            "latency_ms": {"embed": embed_ms, "retrieve": retrieve_ms, "rerank": rerank_ms},
+            "selected": [
+                {
+                    "doc_id": _doc_id_from_source(d.metadata.get("source")),
+                    "source": d.metadata.get("source"),
+                    "chunk_index": d.metadata.get("chunk_index"),
+                    "score": score,
+                    "rank": rnk,
+                }
+                for (d, score, rnk) in ranked
+            ],
+        })
         return merged[:8]
 
     def retrieve_with_graph_formatted(question: str) -> str:
         return format_docs(retrieve_with_graph(question))
 
+    def retrieve_standard_formatted(question: str) -> str:
+        meta = _common_meta(question)
+
+        t0 = time.perf_counter()
+        try:
+            _ = embeddings.embed_query(question)
+        finally:
+            t1 = time.perf_counter()
+        embed_ms = int((t1 - t0) * 1000)
+
+        t2 = time.perf_counter()
+        with_scores = vectorstore.similarity_search_with_score(question, k=4)
+        t3 = time.perf_counter()
+        retrieve_ms = int((t3 - t2) * 1000)
+
+        docs = [d for d, _ in with_scores]
+
+        _log_event("retrieval", {
+            **meta,
+            "stage": "retrieval",
+            "latency_ms": {"embed": embed_ms, "retrieve": retrieve_ms, "rerank": 0},
+            "selected": [
+                {
+                    "doc_id": _doc_id_from_source(d.metadata.get("source")),
+                    "source": d.metadata.get("source"),
+                    "chunk_index": d.metadata.get("chunk_index"),
+                    "score": score,
+                    "rank": i + 1,
+                }
+                for i, (d, score) in enumerate(with_scores)
+            ],
+        })
+        return format_docs(docs)
+
     rag = (
         {
-            "context": (retrieve_with_graph_formatted if _graph_enabled() else (retriever | format_docs)),
+            "context": (retrieve_with_graph_formatted if _graph_enabled() else retrieve_standard_formatted),
             "question": RunnablePassthrough(),
         }
         | prompt
@@ -182,4 +344,4 @@ def build_chain():
 
 if __name__ == "__main__":
     chain = build_chain()
-    print(chain.invoke("Cómo añado un certificado SSL en k3s?"))
+    print(chain.invoke("Cómo puedo añadir una unidad externa USB?"))
