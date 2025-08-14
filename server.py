@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse
 
-from rag import build_chain
+from rag import build_agentic
 
 chain = None
 
@@ -16,7 +16,7 @@ chain = None
 async def lifespan(app: FastAPI):
     global chain
     try:
-        chain = build_chain()
+        chain = build_agentic()
     except Exception as exc:
         chain = None
         app.logger = getattr(app, "logger", None)
@@ -57,7 +57,7 @@ def query(req: QueryRequest):
     global chain
     if chain is None:
         try:
-            chain = build_chain()
+            chain = build_agentic()
         except Exception as exc:
             raise HTTPException(
                 status_code=503, detail=f"Chain unavailable: {exc}")
