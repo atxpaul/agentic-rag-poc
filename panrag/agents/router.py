@@ -59,6 +59,10 @@ class RouterAgent:
 
         if any(x in ql for x in config.CONTINUITY_KEYWORDS):
             decision["use_graph"] = True
+
+        # Apply global override if set via env var
+        if config.RETRIEVAL_K_OVERRIDE > 0:
+            decision["k"] = config.RETRIEVAL_K_OVERRIDE
         log_event("route", {**meta, "stage": "route", **decision,
                   "lang": lang_detected, "lang_allow": config.ROUTER_LANG_ALLOW})
         return decision

@@ -1,4 +1,5 @@
 import os
+import logging
 from pathlib import Path
 from typing import List
 
@@ -11,6 +12,15 @@ from langchain_core.embeddings import Embeddings
 from langchain_community.document_loaders import TextLoader, PyPDFLoader
 from qdrant_client import QdrantClient
 from qdrant_client.models import VectorParams, Distance
+
+# -------------------- Logging Setup --------------------
+# Logs are printed to stdout to provide real-time feedback on which file is being processed
+# and on which stage the pipeline is executing. This helps diagnose where the script might hang.
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
 
 load_dotenv()
 
@@ -55,6 +65,7 @@ def load_docs(path: Path):
     exts = {".txt", ".md", ".markdown", ".pdf"}
     for p in path.rglob("*"):
         if p.is_file() and p.suffix.lower() in exts:
+            logging.info(f"Loading file: {p.relative_to(path)}")
             if p.suffix.lower() in {".txt", ".md", ".markdown"}:
                 docs.extend(TextLoader(str(p), encoding="utf-8").load())
             elif p.suffix.lower() == ".pdf":
@@ -145,13 +156,16 @@ def _stable_chunk_id(source: str, content: str) -> str:
 
 
 def main():
+    logging.info("Scanning documents directory ...")
     docs = load_docs(DATA_DIR)
     if not docs:
         raise SystemExit("No documents found in ./data")
+    logging.info(f"Loaded {len(docs)} documents. Splitting into chunks ...")
 
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=800, chunk_overlap=120)
     chunks = splitter.split_documents(docs)
+    logging.info(f"Generated {len(chunks)} chunks. Preparing embeddings ...")
 
     # Assign a stable chunk_index per source and compute chunk_id
     by_source = {}
@@ -208,13 +222,19 @@ def main():
         except Exception:
             pass
 
-    vectorstore.add_documents(documents=chunks, ids=ids)
+    logging.info("Uploading chunks into the vector store ...")
+    vectorstore.add_documents(documents=chunks, ids=ids, batch_size=int(
+        os.getenv("QDRANT_BATCH_SIZE", "256")))
+    logging.info("Upload complete.")
 
     # Optionally mirror structure into a graph database for structural navigation
     if _graph_enabled():
+        logging.info(
+            "GRAPH_ENABLED=true -> Mirroring chunks into Neo4j graph ...")
         _build_graph_for_chunks(chunks)
+        logging.info("Graph ingestion complete.")
 
-    print(
+    logging.info(
         f"Ingested {len(chunks)} chunks into Qdrant collection '{QDRANT_COLLECTION}'")
 
 

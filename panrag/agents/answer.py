@@ -15,6 +15,8 @@ class AnswerAgent:
         intent = meta.get("question_meta", {}).get("intent", "task")
         domain = meta.get("question_meta", {}).get("domain", "default")
         system = select_system_prompt(domain)
+        if config.ANSWER_PROMPT_SUFFIX:
+            system += " " + config.ANSWER_PROMPT_SUFFIX.strip()
         prompt = ChatPromptTemplate.from_messages([
             ("system", system),
             ("human", "Question:\n{question}\n\nContext:\n{context}"),

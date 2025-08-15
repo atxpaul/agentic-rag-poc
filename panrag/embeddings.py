@@ -1,8 +1,10 @@
 from typing import List
 import requests
 
+from langchain_core.embeddings import Embeddings
 
-class LMStudioEmbeddings:
+
+class LMStudioEmbeddings(Embeddings):
     def __init__(self, base_url: str, api_key: str, model: str, timeout: int = 60):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key or "lm-studio"

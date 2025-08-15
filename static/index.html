@@ -9,6 +9,8 @@
         </script>
         <script src="https://cdn.tailwindcss.com"></script>
         <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+        <!-- Markdown parser -->
+        <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     </head>
     <body class="h-screen bg-zinc-900 text-zinc-100">
         <div id="app" class="h-full flex">
@@ -73,11 +75,10 @@
                                     >🤖</div
                                 >
                                 <div
-                                    class="max-w-[85%] rounded-lg px-4 py-3 whitespace-pre-wrap leading-relaxed"
-                                    :class="m.role === 'assistant' ? 'bg-zinc-800 text-zinc-100' : 'bg-emerald-600 text-white'"
-                                >
-                                    {{ m.content }}
-                                </div>
+                                    class="max-w-[85%] rounded-lg px-4 py-3 leading-relaxed prose prose-invert"
+                                    :class="m.role === 'assistant' ? 'bg-zinc-800' : 'bg-emerald-600 text-white'"
+                                    v-html="md(m.content)"
+                                ></div>
                                 <div
                                     v-if="m.role === 'user'"
                                     class="h-8 w-8 rounded bg-zinc-700 grid place-items-center shrink-0"
@@ -219,6 +220,13 @@
 
                     onMounted(scrollToBottom);
 
+                    function md(text) {
+                        if (window.marked) {
+                            return marked.parse(text || '');
+                        }
+                        return text;
+                    }
+
                     return {
                         question,
                         messages,
@@ -227,6 +235,7 @@
                         send,
                         newChat,
                         messageScroll,
+                        md,
                     };
                 },
             }).mount('#app');

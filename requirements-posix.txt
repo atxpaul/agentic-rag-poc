@@ -1,0 +1,3 @@
+# Requirements for POSIX systems (Linux/Mac) with uvloop for better performance
+-r requirements.txt
+uvloop==0.21.0 

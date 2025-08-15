@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse
 
-from rag import build_agentic
+from panrag import build_agentic
 
 chain = None
 

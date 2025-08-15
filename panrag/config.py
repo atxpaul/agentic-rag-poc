@@ -32,6 +32,9 @@ PROMPT_SYSTEM_GENERIC = os.getenv(
     "You are a precise assistant. Answer using ONLY the provided context. If the answer isn't in the context, say you don't know.",
 )
 PROMPT_SYSTEM_BY_DOMAIN_RAW = os.getenv("PROMPT_SYSTEM_BY_DOMAIN", "")
+
+# Optional suffix appended to the system prompt of the AnswerAgent, configurable via .env.
+ANSWER_PROMPT_SUFFIX = os.getenv("ANSWER_PROMPT_SUFFIX", "")
 VERIFY_PROMPT_SYSTEM = os.getenv(
     "VERIFY_PROMPT_SYSTEM",
     "You are a strict verifier. Extract claims, count them, and map citations. Return JSON with: grounded (true/false), reason (string), claims_total (int), claims_supported (int), citations (array of objects with claim_id, source, rank).",
@@ -50,6 +53,10 @@ ROUTER_CONF_MED = float(os.getenv("ROUTER_CONF_MED", "0.40"))
 RETRIEVAL_K_HIGH = int(os.getenv("RETRIEVAL_K_HIGH", "6"))
 RETRIEVAL_K_MED = int(os.getenv("RETRIEVAL_K_MED", "12"))
 RETRIEVAL_K_LOW = int(os.getenv("RETRIEVAL_K_LOW", "20"))
+
+# Optional override for router to force a fixed k regardless of confidence logic.
+RETRIEVAL_K_OVERRIDE = int(
+    os.getenv("RETRIEVAL_K_OVERRIDE", "0"))  # 0 means disabled
 
 # Language-aware routing
 ROUTER_LANG_DETECT_ENABLED = os.getenv(
