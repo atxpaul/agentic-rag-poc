@@ -16,6 +16,12 @@ An **Agentic Retrieval-Augmented Generation (RAG) System** that uses multiple sp
 -   **Automatic Verification** of responses with coverage and diversity metrics
 -   **Adaptive Retrieval** with context expansion when needed
 
+### 💬 Ephemeral Conversation Memory
+
+-   **Per-conversation memory** backed by Redis (ephemeral buffer) with a **durable NDJSON log** in MinIO/S3
+-   Frontend persists a `conv_id` in localStorage; the backend uses it to fetch and append turns
+-   Optional S3→Redis backfill on first access so prior-day turns remain available
+
 ### 🔍 Advanced Retrieval
 
 -   Intelligent chunking with `RecursiveCharacterTextSplitter` (size 800, overlap 120)
@@ -40,12 +46,149 @@ User → Router Agent → [Need docs?] → Retriever Agent → Answer Agent → 
        (confidence, k)              + reranking   contextual   + metrics
 ```
 
+## Ephemeral Conversation Memory (Redis + MinIO)
+
+### Overview
+
+-   The server maintains a short window of conversation history per `conv_id` in Redis and writes every turn to an NDJSON object per day in MinIO/S3.
+-   Agents do not talk to Redis/S3 directly. The server reads history from Redis and passes it to `AnswerAgent`, which uses up to `ANSWER_HISTORY_TURNS` turns.
+
+### Flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant UI as Web UI (conv_id in localStorage)
+    participant API as FastAPI /query
+    participant MEM as EphemeralMemory
+    participant REDIS as Redis (buffer)
+    participant S3 as MinIO/S3 (NDJSON log)
+
+    UI->>API: POST /query {question, conv_id}
+    API->>MEM: ensure_backfill(conv_id)
+    MEM->>REDIS: LLEN buffer:<conv_id>
+    alt empty buffer and S3 enabled
+        MEM->>S3: get memlog/<conv_id>/YYYY-MM-DD.ndjson (± previous days)
+        MEM->>REDIS: RPUSH last N turns + EXPIRE
+    end
+    API->>MEM: get_buffer(conv_id)
+    MEM->>REDIS: LRANGE buffer:<conv_id>
+    API->>API: AnswerAgent.run(..., conversation_history)
+    API->>MEM: append_turn(conv_id, role="user"|"assistant", text, meta)
+    MEM->>REDIS: RPUSH + LTRIM + EXPIRE
+    MEM->>S3: PUT memlog/<conv_id>/YYYY-MM-DD.ndjson (append line)
+```
+
+### Data layout
+
+-   Redis keys:
+    -   `buffer:<conv_id>`: list of JSON turns, capped to `REDIS_BUFFER_MAX_TURNS`, TTL `REDIS_TTL_HOURS`
+    -   `buffer:<conv_id>:seq`: integer sequence counter
+-   S3 objects:
+    -   `S3_MEMLOG_PREFIX/<conv_id>/YYYY-MM-DD.ndjson`
+    -   Each line is one JSON turn
+
+### Frontend behavior
+
+-   The UI keeps a `conv_id` in `localStorage` and sends it on every request.
+-   Clicking “Nueva conversación” clears `conv_id` and starts a fresh history.
+
+### Configuration (.env)
+
+```env
+# ===== EPHEMERAL MEMORY: REDIS =====
+REDIS_ENABLED=true
+# If running server on host and Redis via docker with exposed port
+REDIS_URL=redis://localhost:6379/0
+# Or, if server runs in the same docker compose network
+# REDIS_URL=redis://redis:6379/0
+REDIS_TTL_HOURS=72
+REDIS_BUFFER_MAX_TURNS=12
+
+# ===== DURABLE LOG: MINIO / S3 =====
+S3_ENABLED=true
+S3_ENDPOINT=http://localhost:9000
+S3_ACCESS_KEY=minio
+S3_SECRET_KEY=minio12345
+S3_SECURE=false
+S3_BUCKET=memlog
+S3_MEMLOG_PREFIX=memlog
+S3_BACKFILL_MAX_LINES=200
+
+# ===== ANSWER HISTORY USAGE =====
+ANSWER_USE_HISTORY=true
+ANSWER_HISTORY_TURNS=6
+```
+
+### Docker (Redis and MinIO)
+
+If you run FastAPI on the host, expose Redis from docker:
+
+```yaml
+services:
+    redis:
+        image: redis:7-alpine
+        ports:
+            - '6379:6379'
+```
+
+MinIO requires a bucket; create it once:
+
+```bash
+docker exec agentic-rag-poc-minio-1 mc alias set local http://localhost:9000 minio minio12345
+docker exec agentic-rag-poc-minio-1 mc mb local/memlog
+docker exec agentic-rag-poc-minio-1 mc version enable local/memlog
+```
+
+### Observability
+
+-   The server logs structured events to `logs/rag.log`:
+
+```json
+{"event":"mem.init","redis_connected":true,"s3_ready":true,"s3_bucket":"memlog"}
+{"event":"mem.history.read","conv_id":"...","count":1}
+{"event":"mem.history.used","conv_id":"...","turns_used":1}
+{"event":"mem.redis.append","conv_id":"...","role":"user","seq":2}
+{"event":"mem.s3.append","conv_id":"...","object":"memlog/.../2025-08-17.ndjson","bytes":1234}
+```
+
+### Verify it works
+
+-   Send two messages without resetting the chat (same `conv_id`). On the second message you should see `history_turns_used > 0` in the UI and the events above in the log.
+-   Redis (inside container):
+
+```bash
+docker exec redis redis-cli LLEN buffer:<conv_id>
+docker exec redis redis-cli LRANGE buffer:<conv_id> 0 -1
+```
+
+-   MinIO:
+
+```bash
+docker exec agentic-rag-poc-minio-1 mc ls -r local/memlog
+docker exec agentic-rag-poc-minio-1 mc cat local/memlog/<conv_id>/$(date -u +%F).ndjson
+```
+
+### Troubleshooting (memory)
+
+-   `history_turns_used` is 0 on second turn → check `REDIS_ENABLED`, port exposure, and `mem.history.read` count in logs.
+-   No NDJSON objects in MinIO → confirm `S3_ENABLED=true`, `S3_BUCKET` set and exists, and look for `mem.s3.append` or `mem.s3.append.error` with details.
+
 ### Detailed Agentic RAG Flow
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────┐
 │                                USER QUERY                                      │
 │                              "How to install X?"                               │
+│                      conv_id from UI (localStorage)                             │
+└─────────────────────┬───────────────────────────────────────────────────────────┘
+                      │
+                      ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                    SERVER (Conversation Memory Handling)                        │
+│  1) ensure_backfill(conv_id): if Redis empty → read recent NDJSON from S3       │
+│  2) get_buffer(conv_id): read history window from Redis                         │
+│  3) pass conversation_history to AgenticRAG                                     │
 └─────────────────────┬───────────────────────────────────────────────────────────┘
                       │
                       ▼
@@ -82,9 +225,17 @@ User → Router Agent → [Need docs?] → Retriever Agent → Answer Agent → 
 │  │ 1. Domain Detection: "technical"                                        │   │
 │  │ 2. Prompt Selection: Technical system prompt                            │   │
 │  │ 3. Context Assembly: 8 docs + metadata                                 │   │
-│  │ 4. Generation: Temperature=0.1, MaxTokens=512                          │   │
-│  │ 5. Response: "To install X, follow these steps..."                     │   │
+│  │ 4. Uses up to ANSWER_HISTORY_TURNS from conversation_history            │   │
+│  │ 5. Generation: Temperature=0.1, MaxTokens=512                          │   │
+│  │ 6. Response: "To install X, follow these steps..."                     │   │
 │  └─────────────────────────────────────────────────────────────────────────┘   │
+└─────────────────────┬───────────────────────────────────────────────────────────┘
+                      │
+                      ▼
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                    SERVER (Persist Conversation Turns)                          │
+│  • Append to Redis: RPUSH buffer:<conv_id> + LTRIM + EXPIRE                     │
+│  • Append to S3:   memlog/<conv_id>/YYYY-MM-DD.ndjson (one line per turn)       │
 └─────────────────────┬───────────────────────────────────────────────────────────┘
                       │
                       ▼
@@ -371,6 +522,55 @@ Start services:
 ```bash
 docker compose up -d
 ```
+
+## MinIO Configuration
+
+The system includes MinIO for object storage. After starting the services, you need to manually configure the MinIO buckets since the automatic initialization was removed due to reliability issues.
+
+### Manual Bucket Setup
+
+Once MinIO is running and healthy, execute these commands to set up the required bucket:
+
+1. **Set MinIO alias:**
+
+```bash
+docker exec agentic-rag-poc-minio-1 mc alias set local http://localhost:9000 minio minio12345
+```
+
+2. **Create the memlog bucket:**
+
+```bash
+docker exec agentic-rag-poc-minio-1 mc mb local/memlog
+```
+
+3. **Enable versioning:**
+
+```bash
+docker exec agentic-rag-poc-minio-1 mc version enable local/memlog
+```
+
+4. **Configure lifecycle (180 days expiration):**
+
+```bash
+docker exec agentic-rag-poc-minio-1 mc ilm add --expiry-days 180 local/memlog
+```
+
+### Verification Commands
+
+To verify the configuration:
+
+```bash
+# List buckets
+docker exec agentic-rag-poc-minio-1 mc ls local
+
+# Check lifecycle configuration
+docker exec agentic-rag-poc-minio-1 mc ilm ls local/memlog
+
+# Verify versioning
+docker exec agentic-rag-poc-minio-1 mc version info local/memlog
+```
+
+**Note:** The MinIO service runs on port 9000 (API) and 9001 (Web Console). Access the web interface at `http://localhost:9001` with credentials `minio/minio12345`.
 
 ## Document Ingestion
 

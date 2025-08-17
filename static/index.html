@@ -183,6 +183,8 @@
                         messages.value = [];
                         question.value = '';
                         error.value = '';
+                        // Reset conversation id
+                        localStorage.removeItem('conv_id');
                     }
 
                     async function send() {
@@ -194,10 +196,22 @@
                         loading.value = true;
                         scrollToBottom();
                         try {
+                            // Persist or generate conv_id
+                            let cid = localStorage.getItem('conv_id');
+                            if (!cid) {
+                                cid =
+                                    crypto && crypto.randomUUID
+                                        ? crypto.randomUUID()
+                                        : Math.random().toString(36).slice(2);
+                                localStorage.setItem('conv_id', cid);
+                            }
                             const res = await fetch('/query', {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ question: q }),
+                                body: JSON.stringify({
+                                    question: q,
+                                    conv_id: cid,
+                                }),
                             });
                             if (!res.ok) {
                                 const data = await res.json().catch(() => ({}));
@@ -206,9 +220,16 @@
                                 );
                             }
                             const data = await res.json();
+                            const memTag =
+                                data &&
+                                typeof data.history_turns_used === 'number'
+                                    ? `\n\n<sub class=\"text-xs text-zinc-500\">mem: ${
+                                          data.history_turns_used
+                                      } • cid: ${data.conv_id || ''}</sub>`
+                                    : '';
                             messages.value.push({
                                 role: 'assistant',
-                                content: data.answer || '',
+                                content: (data.answer || '') + memTag,
                             });
                         } catch (e) {
                             error.value = e.message || String(e);

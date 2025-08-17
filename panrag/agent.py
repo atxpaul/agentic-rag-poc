@@ -2,7 +2,7 @@ import hashlib
 import json
 import time
 import uuid
-from typing import List
+from typing import List, Dict, Any, Optional
 
 from qdrant_client import QdrantClient
 from langchain_qdrant import QdrantVectorStore
@@ -77,9 +77,15 @@ class AgenticRAG:
 
     def invoke(self, question: str) -> str:
         meta = self._common_meta(question)
+        return self.invoke_with_history(question, [], meta)
+
+    def invoke_with_history(self, question: str, conversation_history: List[Dict[str, Any]], meta: Optional[dict] = None) -> str:
+        """Invoke with conversation history for context-aware responses."""
+        if meta is None:
+            meta = self._common_meta(question)
         decision = self.router.decide(question, self.vectorstore, meta)
         if not decision.get("need"):
-            ans = self.answerer.run(question, [], meta)
+            ans = self.answerer.run(question, [], meta, conversation_history)
             ver = self.verifier.run(question, ans, [], meta)
             if ver.get("grounded") is False:
                 safe = (
@@ -94,7 +100,7 @@ class AgenticRAG:
             return ans
 
         docs = self.retriever.run(question, decision, meta)
-        ans = self.answerer.run(question, docs, meta)
+        ans = self.answerer.run(question, docs, meta, conversation_history)
         ver = self.verifier.run(question, ans, docs, meta)
         if not ver.get("passes_policy"):
             recovery = {"attempts": 0, "action": "", "outcome": ""}
@@ -106,7 +112,8 @@ class AgenticRAG:
                     config.RETRIEVAL_K_LOW, decision.get("k", config.RETRIEVAL_K_HIGH) * 2))
                 more_docs = [d for d, _ in more_pairs]
                 docs2 = self._dedupe_docs(docs + more_docs)
-                ans2 = self.answerer.run(question, docs2, meta)
+                ans2 = self.answerer.run(
+                    question, docs2, meta, conversation_history)
                 ver2 = self.verifier.run(question, ans2, docs2, meta)
                 if ver2.get("passes_policy"):
                     log_event("policy", {**meta, "citation_gate": {"required": True,

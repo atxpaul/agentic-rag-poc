@@ -99,3 +99,27 @@ ANSWER_STOP_SEQUENCES = [s.strip() for s in os.getenv(
 # Policy
 POLICY_CITATION_MIN_COVERAGE = float(
     os.getenv("POLICY_CITATION_MIN_COVERAGE", "0.9"))
+
+# ===== Ephemeral Memory: Redis buffer =====
+REDIS_ENABLED = os.getenv(
+    "REDIS_ENABLED", "false").lower() in ("1", "true", "yes")
+REDIS_URL = os.getenv("REDIS_URL", "")
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+REDIS_DB = int(os.getenv("REDIS_DB", "0"))
+REDIS_TTL_HOURS = int(os.getenv("REDIS_TTL_HOURS", "72"))
+REDIS_BUFFER_MAX_TURNS = int(os.getenv("REDIS_BUFFER_MAX_TURNS", "12"))
+
+# ===== Durable NDJSON Log: S3/MinIO =====
+S3_ENABLED = os.getenv("S3_ENABLED", "false").lower() in ("1", "true", "yes")
+S3_ENDPOINT = os.getenv("S3_ENDPOINT", "http://localhost:9000")
+S3_BUCKET = os.getenv("S3_BUCKET", "")
+S3_ACCESS_KEY = os.getenv("S3_ACCESS_KEY", "")
+S3_SECRET_KEY = os.getenv("S3_SECRET_KEY", "")
+S3_SECURE = os.getenv("S3_SECURE", "false").lower() in ("1", "true", "yes")
+S3_MEMLOG_PREFIX = os.getenv("S3_MEMLOG_PREFIX", "memlog")
+S3_BACKFILL_MAX_LINES = int(os.getenv("S3_BACKFILL_MAX_LINES", "200"))
+
+ANSWER_USE_HISTORY = os.getenv(
+    "ANSWER_USE_HISTORY", "true").lower() in ("1", "true", "yes")
+ANSWER_HISTORY_TURNS = int(os.getenv("ANSWER_HISTORY_TURNS", "6"))
